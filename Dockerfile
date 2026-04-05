@@ -19,8 +19,9 @@ ENV HOME=/app
 
 COPY --from=builder /app/zig-out/bin/nullclaw .
 
-# Script Pukul Rata: Masukkan semua kemungkinan format Token Telegram
+# Script Paksaan: Railway tidak akan bisa skip ini
 RUN echo '#!/bin/sh' > /app/start.sh && \
+    echo 'echo ">>> MEMULAI SCRIPT ENTRYPOINT <<<"' >> /app/start.sh && \
     echo 'mkdir -p /app/.nullclaw/workspace /app/data && chmod -R 777 /app' >> /app/start.sh && \
     echo 'cat <<EOF > /app/.nullclaw/config.json' >> /app/start.sh && \
     echo '{' >> /app/start.sh && \
@@ -39,8 +40,11 @@ RUN echo '#!/bin/sh' > /app/start.sh && \
     echo '  }' >> /app/start.sh && \
     echo '}' >> /app/start.sh && \
     echo 'EOF' >> /app/start.sh && \
+    echo 'cp /app/.nullclaw/config.json /app/config.json' >> /app/start.sh && \
     echo 'cp /app/.nullclaw/config.json /app/nullclaw.json' >> /app/start.sh && \
+    echo 'echo ">>> SCRIPT SELESAI, BOT DINYALAKAN <<<"' >> /app/start.sh && \
     echo 'exec ./nullclaw agent' >> /app/start.sh && \
     chmod +x /app/start.sh
 
-CMD ["sh", "/app/start.sh"]
+# INI KUNCIANNYA: Pakai ENTRYPOINT agar Railway dipaksa menjalankan start.sh
+ENTRYPOINT ["sh", "/app/start.sh"]
