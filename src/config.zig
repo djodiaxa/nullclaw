@@ -1,6 +1,7 @@
 const std = @import("std");
+const config_paths = @import("config_paths.zig");
 const fs_compat = @import("fs_compat.zig");
-const platform = @import("platform.zig");
+const model_refs = @import("model_refs.zig");
 const provider_names = @import("provider_names.zig");
 const secrets = @import("security/secrets.zig");
 pub const config_types = @import("config_types.zig");
@@ -28,6 +29,42 @@ fn writeJsonStr(w: anytype, s: []const u8) !void {
         }
     }
     try w.writeByte('"');
+}
+
+pub const PrimaryModelRef = struct {
+    provider: []const u8,
+    model: []const u8,
+};
+
+fn hasVersionedApiSegment(url: []const u8) bool {
+    const proto_start = std.mem.indexOf(u8, url, "://") orelse return false;
+    var i: usize = proto_start + 3;
+    while (i + 2 < url.len) : (i += 1) {
+        if (url[i] != '/' or url[i + 1] != 'v') continue;
+        var j = i + 2;
+        var has_digit = false;
+        while (j < url.len and std.ascii.isDigit(url[j])) : (j += 1) {
+            has_digit = true;
+        }
+        if (!has_digit) continue;
+        if (j == url.len or (j < url.len and url[j] == '/')) return true;
+    }
+    return false;
+}
+
+pub fn splitPrimaryModelRef(primary: []const u8) ?PrimaryModelRef {
+    const split = model_refs.splitProviderModel(primary) orelse return null;
+    return .{
+        .provider = split.provider orelse return null,
+        .model = split.model,
+    };
+}
+
+pub fn shouldSerializeDefaultModelProviderField(provider: []const u8) bool {
+    if (!std.mem.startsWith(u8, provider, "custom:")) return false;
+    const custom_target = provider["custom:".len..];
+    if (std.mem.indexOf(u8, custom_target, "://") == null) return false;
+    return !hasVersionedApiSegment(custom_target);
 }
 
 // ── Re-export all types so downstream `@import("config.zig").Foo` still works ──
@@ -168,6 +205,7 @@ pub const Config = struct {
     runtime: RuntimeConfig = .{},
     reliability: ReliabilityConfig = .{},
     scheduler: SchedulerConfig = .{},
+    messages: config_types.MessagesConfig = .{},
     agent: AgentConfig = .{},
     heartbeat: HeartbeatConfig = .{},
     cron: CronConfig = .{},
@@ -215,6 +253,11 @@ pub const Config = struct {
     /// Convenience: API key for the default_provider.
     pub fn defaultProviderKey(self: *const Config) ?[]const u8 {
         return self.getProviderKey(self.default_provider);
+    }
+
+    /// Sandbox defaults to enabled when the config leaves it unset.
+    pub fn sandboxEnabled(self: *const Config) bool {
+        return self.security.sandbox.enabled orelse true;
     }
 
     fn sanitizeStatePathSegment(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
@@ -371,15 +414,11 @@ pub const Config = struct {
         }
         const allocator = arena_ptr.allocator();
 
-        // NULLCLAW_HOME overrides the default config directory (~/.nullclaw/).
-        const config_dir = std.process.getEnvVarOwned(allocator, "NULLCLAW_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => blk: {
-                const home = platform.getHomeDir(allocator) catch return error.NoHomeDir;
-                break :blk try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
-            },
+        const config_dir = config_paths.defaultConfigDir(allocator) catch |err| switch (err) {
+            error.HomeDirNotFound => return error.NoHomeDir,
             else => return err,
         };
-        const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config.json" });
+        const config_path = try config_paths.pathFromConfigDir(allocator, config_dir, "config.json");
         const default_workspace_dir = try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
 
         var cfg = Config{
@@ -970,7 +1009,19 @@ pub const Config = struct {
                     wrote_agent_field = true;
                 }
                 if (self.default_model) |model| {
-                    try w.print("      \"model\": {{\"primary\": \"{s}/{s}\"}}", .{ self.default_provider, model });
+                    if (shouldSerializeDefaultModelProviderField(self.default_provider)) {
+                        try w.print("      \"model\": {{\"provider\": ", .{});
+                        try writeJsonStr(w, self.default_provider);
+                        try w.print(", \"primary\": ", .{});
+                        try writeJsonStr(w, model);
+                        try w.print("}}", .{});
+                    } else {
+                        const primary = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.default_provider, model });
+                        defer self.allocator.free(primary);
+                        try w.print("      \"model\": {{\"primary\": ", .{});
+                        try writeJsonStr(w, primary);
+                        try w.print("}}", .{});
+                    }
                     if (has_heartbeat) try w.print(",", .{});
                     try w.print("\n", .{});
                 }
@@ -1093,6 +1144,7 @@ pub const Config = struct {
         // Reliability
         try self.writeReliabilitySection(w, &store);
         try w.print("  \"scheduler\": {f},\n", .{std.json.fmt(self.scheduler, .{})});
+        try w.print("  \"messages\": {f},\n", .{std.json.fmt(self.messages, .{})});
         try w.print("  \"agent\": {f},\n", .{std.json.fmt(.{
             .compact_context = self.agent.compact_context,
             .max_tool_iterations = self.agent.max_tool_iterations,
@@ -1433,7 +1485,7 @@ pub const Config = struct {
                 .{},
             ),
             ValidationError.NoDefaultModel => std.debug.print(
-                "No default model configured. Set agents.defaults.model.primary in ~/.nullclaw/config.json or run `nullclaw onboard`.\n",
+                "No default model configured. Set agents.defaults.model.primary in config.json in your nullclaw config directory or run `nullclaw onboard`.\n",
                 .{},
             ),
             ValidationError.TemperatureOutOfRange => std.debug.print("Config error: temperature must be between 0.0 and 2.0.\n", .{}),
@@ -2270,6 +2322,7 @@ test "save roundtrip preserves extended config sections" {
     cfg.scheduler.max_tasks = 32;
     cfg.scheduler.max_concurrent = 2;
     cfg.scheduler.agent_timeout_secs = 123;
+    cfg.messages.inbound.debounce_ms = 1500;
 
     cfg.agent.compact_context = true;
     cfg.agent.max_tool_iterations = 7;
@@ -2302,6 +2355,8 @@ test "save roundtrip preserves extended config sections" {
     cfg.gateway.pair_rate_limit_per_minute = 20;
     cfg.gateway.webhook_rate_limit_per_minute = 80;
     cfg.gateway.idempotency_ttl_secs = 120;
+    cfg.gateway.max_body_size_bytes = 2 * 1024 * 1024;
+    cfg.gateway.request_timeout_secs = 45;
     cfg.gateway.paired_tokens = &.{ "tok-1", "tok-2" };
 
     cfg.tunnel.provider = "ngrok";
@@ -2403,6 +2458,7 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expectEqualStrings("docker", loaded.runtime.kind);
     try std.testing.expectEqual(@as(u32, 32), loaded.scheduler.max_tasks);
     try std.testing.expectEqual(@as(u64, 123), loaded.scheduler.agent_timeout_secs);
+    try std.testing.expectEqual(@as(u32, 1500), loaded.messages.inbound.debounce_ms);
     try std.testing.expect(loaded.agent.parallel_tools);
     try std.testing.expect(!loaded.agent.status_show_emojis);
     try std.testing.expectEqualStrings("UTC+08:00", loaded.agent.timezone);
@@ -2411,6 +2467,8 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expect(loaded.memory.response_cache.enabled);
     try std.testing.expectEqual(@as(u32, 2), loaded.gateway.paired_tokens.len);
     try std.testing.expect(loaded.gateway.allow_public_bind);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), loaded.gateway.max_body_size_bytes);
+    try std.testing.expectEqual(@as(u64, 45), loaded.gateway.request_timeout_secs);
     try std.testing.expectEqualStrings("ngrok", loaded.tunnel.provider);
     try std.testing.expect(loaded.tunnel.ngrok != null);
     try std.testing.expectEqualStrings("ngrok-test-token", loaded.tunnel.ngrok.?.auth_token.?);
@@ -3329,6 +3387,16 @@ test "json parse scheduler section" {
     try std.testing.expectEqual(@as(u64, 600), cfg.scheduler.agent_timeout_secs);
 }
 
+test "json parse messages section reads inbound debounce config" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"messages": {"inbound": {"debounce_ms": 1500}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(u32, 1500), cfg.messages.inbound.debounce_ms);
+}
+
 test "json parse agent section" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3567,6 +3635,17 @@ test "json parse gateway paired tokens" {
     try std.testing.expectEqualStrings("token-3", cfg.gateway.paired_tokens[2]);
     for (cfg.gateway.paired_tokens) |t| allocator.free(t);
     allocator.free(cfg.gateway.paired_tokens);
+}
+
+test "json parse gateway configurable limits" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"gateway": {"max_body_size_bytes": 20971520, "request_timeout_secs": 120}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 20 * 1024 * 1024), cfg.gateway.max_body_size_bytes);
+    try std.testing.expectEqual(@as(u64, 120), cfg.gateway.request_timeout_secs);
 }
 
 test "json parse browser allowed domains" {
@@ -3901,6 +3980,19 @@ test "parse agents.defaults.model.primary custom provider supports versioned pat
     try std.testing.expectEqualStrings("minimaxai/minimax-m2.1", cfg.default_model.?);
 }
 
+test "parse agents.defaults.model supports explicit provider field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"agents":{"defaults":{"model":{"provider":"custom:https://example.com/api","primary":"meta-llama/Llama-4-70B-Instruct"}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://example.com/api", cfg.default_provider);
+    try std.testing.expectEqualStrings("meta-llama/Llama-4-70B-Instruct", cfg.default_model.?);
+}
+
 test "parse legacy default_provider with model-only primary preserves model" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3981,6 +4073,47 @@ test "save and load roundtrip" {
     try std.testing.expectEqual(@as(usize, 2), cfg2.agent.vision_disabled_models.len);
     try std.testing.expectEqualStrings("router/text-only", cfg2.agent.vision_disabled_models[0]);
     try std.testing.expect(!cfg2.agent.auto_disable_vision_on_error);
+}
+
+test "save and load roundtrip preserves non-versioned custom default provider" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.default_provider = try allocator.dupe(u8, "custom:https://example.com/api");
+    cfg.default_model = try allocator.dupe(u8, "meta-llama/Llama-4-70B-Instruct");
+
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 1024 * 64);
+
+    // Regression: onboard now accepts non-versioned custom URLs, so save/load
+    // must preserve them without collapsing model path segments into the provider.
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"provider\": \"custom:https://example.com/api\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"primary\": \"meta-llama/Llama-4-70B-Instruct\"") != null);
+
+    var cfg2 = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    try cfg2.parseJson(content);
+
+    try std.testing.expectEqualStrings("custom:https://example.com/api", cfg2.default_provider);
+    try std.testing.expectEqualStrings("meta-llama/Llama-4-70B-Instruct", cfg2.default_model.?);
 }
 
 test "save preserves file-backed system_prompt path" {
@@ -5129,6 +5262,22 @@ test "defaultProviderKey stays null when provider entry omits api key" {
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
     try std.testing.expect(cfg.defaultProviderKey() == null);
+}
+
+test "sandboxEnabled defaults to true and honors explicit override" {
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+
+    try std.testing.expect(cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = false;
+    try std.testing.expect(!cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = true;
+    try std.testing.expect(cfg.sandboxEnabled());
 }
 
 test "tools.media.audio with language only parses correctly" {
