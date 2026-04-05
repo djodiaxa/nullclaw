@@ -16,27 +16,33 @@ RUN apt-get update && apt-get install -y ca-certificates libsqlite3-0 && rm -rf 
 
 WORKDIR /app
 
-ENV XDG_DATA_HOME=/app/data
-ENV XDG_CONFIG_HOME=/app/config
-ENV XDG_CACHE_HOME=/app/cache
+# Paksa Nullclaw pakai folder /app sebagai rumah utamanya
 ENV HOME=/app
 
-RUN mkdir -p /app/data /app/config /app/cache && chmod -R 777 /app
+# Bikin folder tersembunyi tempat Nullclaw selalu mencari config
+RUN mkdir -p /app/.nullclaw/data && chmod -R 777 /app
 COPY --from=builder /app/zig-out/bin/nullclaw .
 
-# Perbaikan Kritis: Struktur JSON disesuaikan persis dengan standar asli Nullclaw
+# Script super sakti buat bikin config persis di tempat yang dicari Nullclaw
 RUN echo '#!/bin/sh' > /app/start.sh && \
-    echo 'cat <<EOF > /app/config.json' >> /app/start.sh && \
+    echo 'echo "=== MEMBUAT FILE CONFIG TELEGRAM ==="' >> /app/start.sh && \
+    echo 'cat <<EOF > /app/.nullclaw/config.json' >> /app/start.sh && \
     echo '{' >> /app/start.sh && \
     echo '  "channels": {' >> /app/start.sh && \
     echo '    "telegram": {' >> /app/start.sh && \
-    echo '      "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
-    echo '      "allow_from": ["*"]' >> /app/start.sh && \
+    echo '      "accounts": {' >> /app/start.sh && \
+    echo '        "main": {' >> /app/start.sh && \
+    echo '          "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
+    echo '          "allow_from": ["*"],' >> /app/start.sh && \
+    echo '          "reply_in_private": true' >> /app/start.sh && \
+    echo '        }' >> /app/start.sh && \
+    echo '      }' >> /app/start.sh && \
     echo '    }' >> /app/start.sh && \
     echo '  }' >> /app/start.sh && \
     echo '}' >> /app/start.sh && \
     echo 'EOF' >> /app/start.sh && \
+    echo 'echo "=== MENYALAKAN BOT ==="' >> /app/start.sh && \
     echo 'exec ./nullclaw agent' >> /app/start.sh && \
     chmod +x /app/start.sh
 
-CMD ["/app/start.sh"]
+CMD ["sh", "/app/start.sh"]
