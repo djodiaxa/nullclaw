@@ -15,28 +15,28 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y ca-certificates libsqlite3-0 && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Paksa Nullclaw pakai folder /app sebagai rumah utamanya
 ENV HOME=/app
 
-# Bikin folder tersembunyi tempat Nullclaw selalu mencari config
-RUN mkdir -p /app/.nullclaw/data && chmod -R 777 /app
 COPY --from=builder /app/zig-out/bin/nullclaw .
 
-# Script super sakti buat bikin config persis di tempat yang dicari Nullclaw
+# Script penyembuh amnesia & pemanggil Telegram
 RUN echo '#!/bin/sh' > /app/start.sh && \
+    echo 'echo "=== MENYIAPKAN FOLDER & DATABASE ==="' >> /app/start.sh && \
+    echo 'mkdir -p /app/.nullclaw/workspace' >> /app/start.sh && \
+    echo 'chmod -R 777 /app/.nullclaw' >> /app/start.sh && \
     echo 'echo "=== MEMBUAT FILE CONFIG TELEGRAM ==="' >> /app/start.sh && \
     echo 'cat <<EOF > /app/.nullclaw/config.json' >> /app/start.sh && \
     echo '{' >> /app/start.sh && \
+    echo '  "workspace": "/app/.nullclaw/workspace",' >> /app/start.sh && \
+    echo '  "memory": {' >> /app/start.sh && \
+    echo '    "driver": "sqlite",' >> /app/start.sh && \
+    echo '    "dsn": "/app/.nullclaw/nullclaw.db"' >> /app/start.sh && \
+    echo '  },' >> /app/start.sh && \
     echo '  "channels": {' >> /app/start.sh && \
     echo '    "telegram": {' >> /app/start.sh && \
-    echo '      "accounts": {' >> /app/start.sh && \
-    echo '        "main": {' >> /app/start.sh && \
-    echo '          "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
-    echo '          "allow_from": ["*"],' >> /app/start.sh && \
-    echo '          "reply_in_private": true' >> /app/start.sh && \
-    echo '        }' >> /app/start.sh && \
-    echo '      }' >> /app/start.sh && \
+    echo '      "enabled": true,' >> /app/start.sh && \
+    echo '      "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
+    echo '      "allow_from": ["*"]' >> /app/start.sh && \
     echo '    }' >> /app/start.sh && \
     echo '  }' >> /app/start.sh && \
     echo '}' >> /app/start.sh && \
