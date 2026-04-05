@@ -24,32 +24,18 @@ ENV HOME=/app
 RUN mkdir -p /app/data /app/config /app/cache && chmod -R 777 /app
 COPY --from=builder /app/zig-out/bin/nullclaw .
 
-# Bikin script otomatis pembaca variabel Railway menjadi config.json
+# Perbaikan Kritis: Struktur JSON disesuaikan persis dengan standar asli Nullclaw
 RUN echo '#!/bin/sh' > /app/start.sh && \
-    echo 'echo "Membuat file konfigurasi..."' >> /app/start.sh && \
     echo 'cat <<EOF > /app/config.json' >> /app/start.sh && \
     echo '{' >> /app/start.sh && \
-    echo '  "provider": "${NULLCLAW_PROVIDER:-google}",' >> /app/start.sh && \
-    echo '  "model": "${NULLCLAW_MODEL:-gemini-3.1-pro-preview}",' >> /app/start.sh && \
-    echo '  "api_keys": {' >> /app/start.sh && \
-    echo '    "${NULLCLAW_PROVIDER:-google}": "${NULLCLAW_API_KEY}"' >> /app/start.sh && \
-    echo '  },' >> /app/start.sh && \
     echo '  "channels": {' >> /app/start.sh && \
     echo '    "telegram": {' >> /app/start.sh && \
-    echo '      "accounts": {' >> /app/start.sh && \
-    echo '        "main": {' >> /app/start.sh && \
-    echo '          "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
-    echo '          "allow_from": ["*"],' >> /app/start.sh && \
-    echo '          "reply_in_private": true' >> /app/start.sh && \
-    echo '        }' >> /app/start.sh && \
-    echo '      }' >> /app/start.sh && \
+    echo '      "bot_token": "${NULLCLAW_TELEGRAM_BOT_TOKEN}",' >> /app/start.sh && \
+    echo '      "allow_from": ["*"]' >> /app/start.sh && \
     echo '    }' >> /app/start.sh && \
     echo '  }' >> /app/start.sh && \
     echo '}' >> /app/start.sh && \
     echo 'EOF' >> /app/start.sh && \
-    echo 'cp /app/config.json /app/nullclaw.json' >> /app/start.sh && \
-    echo 'cp /app/config.json /app/config/config.json' >> /app/start.sh && \
-    echo 'echo "Menyalakan agen Nullclaw..."' >> /app/start.sh && \
     echo 'exec ./nullclaw agent' >> /app/start.sh && \
     chmod +x /app/start.sh
 
